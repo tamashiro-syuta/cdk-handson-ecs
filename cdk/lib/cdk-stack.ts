@@ -1,8 +1,10 @@
-import { Stack, StackProps } from 'aws-cdk-lib';
+// cdk/lib/cdk-stack.ts
+import { RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
 import { Certificate } from 'aws-cdk-lib/aws-certificatemanager';
-import { Vpc } from "aws-cdk-lib/aws-ec2"; // prettier-ignore
-import { CpuArchitecture, EcrImage, OperatingSystemFamily } from "aws-cdk-lib/aws-ecs"; // prettier-ignore
+import { InstanceClass, InstanceSize, InstanceType, Port, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2"; // prettier-ignore
+import { CpuArchitecture, EcrImage, OperatingSystemFamily, Secret } from "aws-cdk-lib/aws-ecs"; // prettier-ignore
 import { ApplicationLoadBalancedFargateService } from 'aws-cdk-lib/aws-ecs-patterns';
+import { AuroraPostgresEngineVersion, ClusterInstance, DatabaseCluster, DatabaseClusterEngine, InstanceUpdateBehaviour, } from 'aws-cdk-lib/aws-rds'; // prettier-ignore
 import { HostedZone } from 'aws-cdk-lib/aws-route53';
 import { Construct } from 'constructs';
 import { join } from 'path';
@@ -26,16 +28,47 @@ export class CdkStack extends Stack {
     if (domainName instanceof Error) throw domainName;
     if (certificateArn instanceof Error) throw certificateArn;
 
+    const rds = new DatabaseCluster(this, DatabaseCluster.name, {
+      vpc: Vpc.fromLookup(this, Vpc.name, { vpcId }),
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      engine: DatabaseClusterEngine.auroraPostgres({
+        version: AuroraPostgresEngineVersion.VER_15_3,
+      }),
+      instanceUpdateBehaviour: InstanceUpdateBehaviour.ROLLING,
+      writer: ClusterInstance.provisioned('WriterInstanceT3Medium', {
+        instanceType: InstanceType.of(InstanceClass.T3, InstanceSize.MEDIUM),
+        enablePerformanceInsights: true,
+      }),
+      readers: [
+        ClusterInstance.provisioned('ReaderInstanceT3Medium', {
+          instanceType: InstanceType.of(InstanceClass.T3, InstanceSize.MEDIUM),
+          enablePerformanceInsights: true,
+        }),
+      ],
+      defaultDatabaseName: 'zon100',
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    if (!rds.secret) return;
+
     // レベル1~3まであり、数字が大きくなると抽象度が上がる(数字が小さいほど、カスタマイズ性が高くなる)
-    const { targetGroup, taskDefinition } = new ApplicationLoadBalancedFargateService(
+    const { targetGroup, service, taskDefinition } = new ApplicationLoadBalancedFargateService(
       this,
       ApplicationLoadBalancedFargateService.name,
       {
-        vpc: Vpc.fromLookup(this, Vpc.name, { vpcId }),
+        vpc: rds.vpc,
         taskImageOptions: {
           image,
           command: ['bun', 'run', 'start'],
           containerPort: 3000,
+          secrets: {
+            // secrets managerから取得(Auroraなので、自動で設定されるやつを使っている)
+            DB_HOST: Secret.fromSecretsManager(rds.secret, 'host'),
+            DB_PORT: Secret.fromSecretsManager(rds.secret, 'port'),
+            DB_USER: Secret.fromSecretsManager(rds.secret, 'username'),
+            DB_PASS: Secret.fromSecretsManager(rds.secret, 'password'),
+            DB_NAME: Secret.fromSecretsManager(rds.secret, 'dbname'),
+          },
         },
         domainName: `${subDomain}.${domainName}`,
         domainZone: HostedZone.fromLookup(this, 'HostedZone', { domainName }),
@@ -57,5 +90,7 @@ export class CdkStack extends Stack {
       port: `${taskDefinition.defaultContainer?.containerPort}`,
       path: '/',
     });
+
+    rds.connections.allowFrom(service, Port.tcp(rds.clusterEndpoint.port));
   }
 }
