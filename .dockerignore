@@ -1,0 +1,8 @@
+# .dockerignore
+
+node_modules
+.gitignore
+docker-compose.yml
+dockerfile
+*.md
+cdk
