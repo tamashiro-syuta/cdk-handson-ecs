@@ -1,0 +1,13 @@
+{
+  "version": "5",
+  "dialect": "pg",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1695288950710,
+      "tag": "0000_graceful_medusa",
+      "breakpoints": true
+    }
+  ]
+}
